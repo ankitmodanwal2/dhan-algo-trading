@@ -12,12 +12,11 @@ import org.springframework.http.*;
 import org.springframework.stereotype.Service;
 import org.springframework.web.client.RestTemplate;
 import org.springframework.web.client.HttpStatusCodeException;
+import org.springframework.http.client.ClientHttpResponse;
 import org.springframework.web.client.ResponseErrorHandler;
 import java.io.IOException;
 import java.time.LocalDateTime;
 import java.util.*;
-import org.springframework.http.client.ClientHttpResponse;
-import org.springframework.web.client.ResponseErrorHandler;
 
 @Service
 @Slf4j
@@ -29,9 +28,7 @@ public class DhanService {
     private final RestTemplate restTemplate;
     private static final String DHAN_BASE_URL = "https://api.dhan.co";
 
-    // 🌟 1. Constructor for RestTemplate setup 🌟
     public DhanService(RestTemplateBuilder restTemplateBuilder) {
-        // Use RestTemplateBuilder to set up custom error handling
         this.restTemplate = restTemplateBuilder
                 .errorHandler(new RestTemplateErrorHandler())
                 .build();
@@ -70,38 +67,35 @@ public class DhanService {
             HttpHeaders headers = getDhanHeaders(account.get().getAccessToken());
             HttpEntity<String> entity = new HttpEntity<>(headers);
 
-            // Call Dhan API to get positions
             String url = DHAN_BASE_URL + "/v2/positions";
 
-            // 🌟 2. Changed expected type from Map.class to List.class 🌟
-            // Dhan APIs often return a JSON array as the root element for lists.
+            log.info("Fetching positions from Dhan API: {}", url);
+
             ResponseEntity<List> response = restTemplate.exchange(
                     url, HttpMethod.GET, entity, List.class
             );
 
-            // Parse response and convert to Position objects
-            // The response body is now a List, which we cast and parse.
+            log.info("Dhan API Response Status: {}", response.getStatusCode());
+            log.info("Dhan API Response Body: {}", response.getBody());
+
             List<Position> positions = parsePositions(response.getBody());
 
-            // Update last synced time
+            log.info("Parsed {} positions", positions.size());
+
             account.get().setLastSyncedAt(LocalDateTime.now());
             accountRepository.save(account.get());
 
             return positions;
 
         } catch (HttpStatusCodeException e) {
-            // 🌟 3. Specific logging for API errors (e.g., 401 Unauthorized) 🌟
             log.error("Dhan Positions API returned status {}: {}",
                     e.getStatusCode(),
                     e.getResponseBodyAsString());
-
-            // Return mock data for demonstration after logging the real error
-            return getMockPositions();
+            throw new RuntimeException("Failed to fetch positions: " + e.getResponseBodyAsString());
 
         } catch (Exception e) {
-            log.error("Error fetching positions from Dhan: {}", e.getMessage());
-            // Return mock data for demonstration
-            return getMockPositions();
+            log.error("Error fetching positions from Dhan", e);
+            throw new RuntimeException("Failed to fetch positions: " + e.getMessage());
         }
     }
 
@@ -144,7 +138,6 @@ public class DhanService {
 
         } catch (Exception e) {
             log.error("Error creating order on Dhan: {}", e.getMessage());
-            // Return mock order for demonstration
             return getMockOrder(request);
         }
     }
@@ -184,7 +177,6 @@ public class DhanService {
         }
     }
 
-    // Helper method for headers
     private HttpHeaders getDhanHeaders(String accessToken) {
         HttpHeaders headers = new HttpHeaders();
         headers.set("access-token", accessToken);
@@ -192,34 +184,161 @@ public class DhanService {
         return headers;
     }
 
-    // 🌟 4. Updated parsePositions to handle List input 🌟
     private List<Position> parsePositions(List<Map<String, Object>> responseList) {
         List<Position> positions = new ArrayList<>();
 
         if (responseList == null || responseList.isEmpty()) {
-            return positions; // Return empty list if no data
+            log.warn("Positions response is null or empty");
+            return positions;
         }
 
-        // **NOTE**: You would implement the logic here to convert each Map
-        // element in responseList into your Position DTO.
-        // For now, we return mock data since the logic is missing.
+        log.info("Parsing {} position records", responseList.size());
 
-        return getMockPositions();
+        for (Map<String, Object> posMap : responseList) {
+            try {
+                log.debug("Parsing position map: {}", posMap);
+
+                Position pos = new Position();
+
+                // Get symbol - try multiple field names
+                String symbol = getStringValue(posMap, "tradingSymbol");
+                if (symbol == null || symbol.isEmpty()) {
+                    symbol = getStringValue(posMap, "securityId");
+                }
+                if (symbol == null || symbol.isEmpty()) {
+                    log.warn("Skipping position with no symbol: {}", posMap);
+                    continue;
+                }
+                pos.setSymbol(symbol);
+
+                // Exchange and Product Type
+                pos.setExchange(getStringValue(posMap, "exchangeSegment"));
+                pos.setProductType(getStringValue(posMap, "productType"));
+
+                // Net Quantity - this is the key field for positions
+                int netQty = getIntValue(posMap, "netQty");
+
+                log.debug("Position {} - netQty: {}", symbol, netQty);
+
+                // Skip if position is closed (netQty = 0)
+                if (netQty == 0) {
+                    log.debug("Skipping position {} with netQty=0", symbol);
+                    continue;
+                }
+
+                pos.setQuantity(Math.abs(netQty));
+                pos.setPositionType(netQty > 0 ? "LONG" : "SHORT");
+
+                // Average Price - try multiple approaches
+                double avgPrice = 0.0;
+
+                // First try: Use buyAvg or sellAvg based on position type
+                if (netQty > 0) {
+                    avgPrice = getDoubleValue(posMap, "buyAvg");
+                    if (avgPrice == 0.0) {
+                        avgPrice = getDoubleValue(posMap, "avgPrice");
+                    }
+                } else {
+                    avgPrice = getDoubleValue(posMap, "sellAvg");
+                    if (avgPrice == 0.0) {
+                        avgPrice = getDoubleValue(posMap, "avgPrice");
+                    }
+                }
+
+                // Fallback: Calculate from day values if available
+                if (avgPrice == 0.0) {
+                    double dayBuyValue = getDoubleValue(posMap, "dayBuyValue");
+                    double daySellValue = getDoubleValue(posMap, "daySellValue");
+                    int dayBuyQty = getIntValue(posMap, "dayBuyQty");
+                    int daySellQty = getIntValue(posMap, "daySellQty");
+
+                    if (netQty > 0 && dayBuyQty > 0) {
+                        avgPrice = dayBuyValue / dayBuyQty;
+                    } else if (netQty < 0 && daySellQty > 0) {
+                        avgPrice = daySellValue / daySellQty;
+                    }
+                }
+
+                pos.setAvgPrice(avgPrice);
+
+                // P&L - use realizedProfit + unrealizedProfit
+                double realizedPnl = getDoubleValue(posMap, "realizedProfit");
+                double unrealizedPnl = getDoubleValue(posMap, "unrealizedProfit");
+                double totalPnl = realizedPnl + unrealizedPnl;
+                pos.setPnl(totalPnl);
+
+                // LTP - Last Traded Price
+                double ltp = getDoubleValue(posMap, "lastTradedPrice");
+                if (ltp == 0.0) {
+                    ltp = getDoubleValue(posMap, "ltp");
+                }
+                if (ltp == 0.0) {
+                    // If LTP not available, calculate from avgPrice + pnl
+                    if (avgPrice > 0 && netQty != 0) {
+                        ltp = avgPrice + (unrealizedPnl / Math.abs(netQty));
+                    }
+                }
+                pos.setLtp(ltp);
+
+                log.info("Successfully parsed position: {} - Qty: {}, Avg: {}, LTP: {}, PnL: {}",
+                        symbol, pos.getQuantity(), avgPrice, ltp, totalPnl);
+
+                positions.add(pos);
+
+            } catch (Exception e) {
+                log.error("Error parsing position map: {}", posMap, e);
+            }
+        }
+
+        log.info("Successfully parsed {} valid positions", positions.size());
+        return positions;
     }
 
-    // This method is fine if the Dhan API returns a single order Map
+    // Helper methods to safely extract values from Map
+    private String getStringValue(Map<String, Object> map, String key) {
+        Object value = map.get(key);
+        if (value == null) return null;
+        return String.valueOf(value);
+    }
+
+    private int getIntValue(Map<String, Object> map, String key) {
+        Object value = map.get(key);
+        if (value == null) return 0;
+        if (value instanceof Number) {
+            return ((Number) value).intValue();
+        }
+        try {
+            return Integer.parseInt(String.valueOf(value));
+        } catch (NumberFormatException e) {
+            log.warn("Could not parse int value for key {}: {}", key, value);
+            return 0;
+        }
+    }
+
+    private double getDoubleValue(Map<String, Object> map, String key) {
+        Object value = map.get(key);
+        if (value == null) return 0.0;
+        if (value instanceof Number) {
+            return ((Number) value).doubleValue();
+        }
+        try {
+            return Double.parseDouble(String.valueOf(value));
+        } catch (NumberFormatException e) {
+            log.warn("Could not parse double value for key {}: {}", key, value);
+            return 0.0;
+        }
+    }
+
     private Order parseOrder(Map<String, Object> response) {
         Order order = new Order();
-        // Parse actual Dhan API response
         order.setOrderId(UUID.randomUUID().toString());
         order.setStatus("PLACED");
         return order;
     }
 
-    // Mock data for demonstration (kept as is)
     private List<Position> getMockPositions() {
         List<Position> positions = new ArrayList<>();
-        // ... (mock position data)
+
         Position pos1 = new Position();
         pos1.setSymbol("RELIANCE");
         pos1.setExchange("NSE");
@@ -245,7 +364,6 @@ public class DhanService {
         return positions;
     }
 
-    // Mock order (kept as is)
     private Order getMockOrder(CreateOrderRequest request) {
         Order order = new Order();
         order.setOrderId("ORD" + System.currentTimeMillis());
@@ -261,12 +379,6 @@ public class DhanService {
         return order;
     }
 
-    // 🌟 5. Custom RestTemplate Error Handler 🌟
-    /**
-     * Prevents RestTemplate from throwing an exception on 4xx/5xx status codes,
-     * allowing the calling method to catch HttpStatusCodeException instead
-     * and log the actual error body from the Dhan API.
-     */
     private static class RestTemplateErrorHandler implements ResponseErrorHandler {
 
         @Override
@@ -277,10 +389,7 @@ public class DhanService {
 
         @Override
         public void handleError(ClientHttpResponse httpResponse) throws IOException {
-            // We leave this body EMPTY on purpose.
-            // By not throwing a specific exception here, we allow the calling
-            // RestTemplate code to throw the HttpStatusCodeException,
-            // which contains the response body you need to log.
+            // Empty on purpose - allows HttpStatusCodeException to be thrown
         }
     }
 }
