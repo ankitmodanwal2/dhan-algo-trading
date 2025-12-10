@@ -117,7 +117,9 @@ function App() {
         setOrder({
             ...order,
             symbol: symbol.tradingSymbol,
-            securityId: symbol.securityId
+            securityId: symbol.securityId,
+            // Update exchange from the selected symbol so the order goes to the right segment
+            exchange: symbol.exchangeSegment === 'NSE' ? 'NSE_EQ' : symbol.exchangeSegment
         });
         setSearchQuery(symbol.tradingSymbol);
         setShowSearchResults(false);

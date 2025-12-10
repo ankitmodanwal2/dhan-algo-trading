@@ -76,12 +76,11 @@ public class DhanService {
                     url, HttpMethod.GET, entity, List.class
             );
 
-            log.info("Dhan API Response Status: {}", response.getStatusCode());
-            log.info("Dhan API Response Body: {}", response.getBody());
+            log.debug("Dhan API Response Body: {}", response.getBody());
 
             List<Position> positions = parsePositions(response.getBody());
 
-            log.info("Parsed {} positions", positions.size());
+            log.info("Parsed {} open positions", positions.size());
 
             account.get().setLastSyncedAt(LocalDateTime.now());
             accountRepository.save(account.get());
@@ -89,11 +88,8 @@ public class DhanService {
             return positions;
 
         } catch (HttpStatusCodeException e) {
-            log.error("Dhan Positions API returned status {}: {}",
-                    e.getStatusCode(),
-                    e.getResponseBodyAsString());
+            log.error("Dhan Positions API returned status {}: {}", e.getStatusCode(), e.getResponseBodyAsString());
             throw new RuntimeException("Failed to fetch positions: " + e.getResponseBodyAsString());
-
         } catch (Exception e) {
             log.error("Error fetching positions from Dhan", e);
             throw new RuntimeException("Failed to fetch positions: " + e.getMessage());
@@ -116,11 +112,14 @@ public class DhanService {
             orderData.put("productType", request.getProductType());
             orderData.put("orderType", request.getOrderType());
             orderData.put("quantity", request.getQuantity());
-            orderData.put("securityId", request.getSymbol());
+            orderData.put("securityId", request.getSymbol()); // In your App.jsx, symbol is passed as securityId
+            orderData.put("validity", "DAY");
 
             if ("LIMIT".equals(request.getOrderType())) {
                 orderData.put("price", request.getPrice());
             }
+
+            log.info("Sending Order to Dhan: {}", orderData);
 
             HttpEntity<Map<String, Object>> entity = new HttpEntity<>(orderData, headers);
 
@@ -129,17 +128,18 @@ public class DhanService {
                     url, HttpMethod.POST, entity, Map.class
             );
 
+            log.info("Order Response: {}", response.getBody());
+
+            // 🌟 FIX: Parse the REAL response from Dhan
             return parseOrder(response.getBody());
 
         } catch (HttpStatusCodeException e) {
-            log.error("Dhan Orders API returned status {}: {}",
-                    e.getStatusCode(),
-                    e.getResponseBodyAsString());
-            return getMockOrder(request);
-
+            log.error("Dhan Orders API Error {}: {}", e.getStatusCode(), e.getResponseBodyAsString());
+            // 🌟 FIX: Throw exception so frontend sees the error instead of "Order Placed"
+            throw new RuntimeException(e.getResponseBodyAsString());
         } catch (Exception e) {
             log.error("Error creating order on Dhan: {}", e.getMessage());
-            return getMockOrder(request);
+            throw new RuntimeException(e.getMessage());
         }
     }
 
@@ -161,20 +161,47 @@ public class DhanService {
             return parseOrder(response.getBody());
 
         } catch (HttpStatusCodeException e) {
-            log.error("Dhan Close Order API returned status {}: {}",
-                    e.getStatusCode(),
-                    e.getResponseBodyAsString());
-            Order order = new Order();
-            order.setOrderId(orderId);
-            order.setStatus("CANCEL_FAILED");
+            log.error("Dhan Close Order API Error {}: {}", e.getStatusCode(), e.getResponseBodyAsString());
+            throw new RuntimeException(e.getResponseBodyAsString());
+        }
+    }
+
+    public Order closePosition(ClosePositionRequest request) {
+        Optional<DhanAccount> account = getActiveAccount();
+        if (account.isEmpty()) {
+            throw new RuntimeException("No active Dhan account linked");
+        }
+
+        try {
+            String transactionType = "LONG".equals(request.getPositionType()) ? "SELL" : "BUY";
+            HttpHeaders headers = getDhanHeaders(account.get().getAccessToken());
+
+            Map<String, Object> orderData = new HashMap<>();
+            orderData.put("dhanClientId", account.get().getClientId());
+            orderData.put("transactionType", transactionType);
+            orderData.put("exchangeSegment", request.getExchange());
+            orderData.put("productType", request.getProductType());
+            orderData.put("orderType", "MARKET");
+            orderData.put("validity", "DAY");
+            orderData.put("quantity", request.getQuantity());
+            orderData.put("securityId", request.getSecurityId());
+
+            log.info("Closing Position: {}", orderData);
+
+            HttpEntity<Map<String, Object>> entity = new HttpEntity<>(orderData, headers);
+            String url = DHAN_BASE_URL + "/v2/orders";
+
+            ResponseEntity<Map> response = restTemplate.exchange(
+                    url, HttpMethod.POST, entity, Map.class
+            );
+
+            Order order = parseOrder(response.getBody());
+            order.setSymbol(request.getSymbol());
             return order;
 
-        } catch (Exception e) {
-            log.error("Error closing order on Dhan: {}", e.getMessage());
-            Order order = new Order();
-            order.setOrderId(orderId);
-            order.setStatus("CANCELLED");
-            return order;
+        } catch (HttpStatusCodeException e) {
+            log.error("Dhan Close Position Error {}: {}", e.getStatusCode(), e.getResponseBodyAsString());
+            throw new RuntimeException("Failed to close position: " + e.getResponseBodyAsString());
         }
     }
 
@@ -187,205 +214,87 @@ public class DhanService {
 
     private List<Position> parsePositions(List<Map<String, Object>> responseList) {
         List<Position> positions = new ArrayList<>();
-
-        if (responseList == null || responseList.isEmpty()) {
-            log.warn("Positions response is null or empty");
-            return positions;
-        }
-
-        log.info("Parsing {} position records", responseList.size());
+        if (responseList == null || responseList.isEmpty()) return positions;
 
         for (Map<String, Object> posMap : responseList) {
             try {
-                log.debug("Parsing position map: {}", posMap);
-
-                Position pos = new Position();
-
-// Get symbol and securityId
-                String symbol = getStringValue(posMap, "tradingSymbol");
-                String securityId = getStringValue(posMap, "securityId");  // ADD THIS
-
-                if (symbol == null || symbol.isEmpty()) {
-                    symbol = securityId;
-                }
-                if (symbol == null || symbol.isEmpty()) {
-                    log.warn("Skipping position with no symbol: {}", posMap);
-                    continue;
-                }
-                pos.setSymbol(symbol);
-                pos.setSecurityId(securityId);  // ADD THIS - Store the security ID
-
-
-                // Exchange and Product Type
-                pos.setExchange(getStringValue(posMap, "exchangeSegment"));
-                pos.setProductType(getStringValue(posMap, "productType"));
-
-                // Net Quantity - this is the key field for positions
                 int netQty = getIntValue(posMap, "netQty");
 
-                log.debug("Position {} - netQty: {}", symbol, netQty);
+                // Only show OPEN positions (netQty != 0)
+                if (netQty == 0) continue;
 
-                // Skip if position is closed (netQty = 0)
-                if (netQty == 0) {
-                    log.debug("Skipping position {} with netQty=0", symbol);
-                    continue;
-                }
-
+                Position pos = new Position();
+                pos.setSymbol(getStringValue(posMap, "tradingSymbol"));
+                pos.setSecurityId(getStringValue(posMap, "securityId"));
+                pos.setExchange(getStringValue(posMap, "exchangeSegment"));
+                pos.setProductType(getStringValue(posMap, "productType"));
                 pos.setQuantity(Math.abs(netQty));
                 pos.setPositionType(netQty > 0 ? "LONG" : "SHORT");
 
-                // Average Price - try multiple approaches
+                // Calculate Price logic
                 double avgPrice = 0.0;
-
-                // First try: Use buyAvg or sellAvg based on position type
                 if (netQty > 0) {
                     avgPrice = getDoubleValue(posMap, "buyAvg");
-                    if (avgPrice == 0.0) {
-                        avgPrice = getDoubleValue(posMap, "avgPrice");
-                    }
+                    if (avgPrice == 0.0) avgPrice = getDoubleValue(posMap, "avgPrice");
                 } else {
                     avgPrice = getDoubleValue(posMap, "sellAvg");
-                    if (avgPrice == 0.0) {
-                        avgPrice = getDoubleValue(posMap, "avgPrice");
-                    }
+                    if (avgPrice == 0.0) avgPrice = getDoubleValue(posMap, "avgPrice");
                 }
 
-                // Fallback: Calculate from day values if available
+                // Fallback for price
                 if (avgPrice == 0.0) {
-                    double dayBuyValue = getDoubleValue(posMap, "dayBuyValue");
-                    double daySellValue = getDoubleValue(posMap, "daySellValue");
+                    double dayBuyVal = getDoubleValue(posMap, "dayBuyValue");
                     int dayBuyQty = getIntValue(posMap, "dayBuyQty");
-                    int daySellQty = getIntValue(posMap, "daySellQty");
-
-                    if (netQty > 0 && dayBuyQty > 0) {
-                        avgPrice = dayBuyValue / dayBuyQty;
-                    } else if (netQty < 0 && daySellQty > 0) {
-                        avgPrice = daySellValue / daySellQty;
-                    }
+                    if (dayBuyQty > 0) avgPrice = dayBuyVal / dayBuyQty;
                 }
 
                 pos.setAvgPrice(avgPrice);
 
-                // P&L - use realizedProfit + unrealizedProfit
                 double realizedPnl = getDoubleValue(posMap, "realizedProfit");
                 double unrealizedPnl = getDoubleValue(posMap, "unrealizedProfit");
-                double totalPnl = realizedPnl + unrealizedPnl;
-                pos.setPnl(totalPnl);
+                pos.setPnl(realizedPnl + unrealizedPnl);
 
-                // LTP - Last Traded Price
                 double ltp = getDoubleValue(posMap, "lastTradedPrice");
-                if (ltp == 0.0) {
-                    ltp = getDoubleValue(posMap, "ltp");
-                }
-                if (ltp == 0.0) {
-                    // If LTP not available, calculate from avgPrice + pnl
-                    if (avgPrice > 0 && netQty != 0) {
-                        ltp = avgPrice + (unrealizedPnl / Math.abs(netQty));
-                    }
-                }
+                if (ltp == 0.0) ltp = getDoubleValue(posMap, "ltp");
                 pos.setLtp(ltp);
 
-                log.info("Successfully parsed position: {} - Qty: {}, Avg: {}, LTP: {}, PnL: {}",
-                        symbol, pos.getQuantity(), avgPrice, ltp, totalPnl);
-
                 positions.add(pos);
-
             } catch (Exception e) {
-                log.error("Error parsing position map: {}", posMap, e);
+                log.error("Error parsing position: {}", e.getMessage());
             }
         }
-
-        log.info("Successfully parsed {} valid positions", positions.size());
         return positions;
     }
 
-    // Helper methods to safely extract values from Map
+    // 🌟 FIX: Actual parsing of Order Response
+    private Order parseOrder(Map<String, Object> response) {
+        Order order = new Order();
+        if (response != null) {
+            order.setOrderId(getStringValue(response, "orderId"));
+            order.setStatus(getStringValue(response, "orderStatus"));
+            // Add other fields if needed
+        }
+        return order;
+    }
+
     private String getStringValue(Map<String, Object> map, String key) {
         Object value = map.get(key);
-        if (value == null) return null;
-        return String.valueOf(value);
+        return value != null ? String.valueOf(value) : null;
     }
 
     private int getIntValue(Map<String, Object> map, String key) {
         Object value = map.get(key);
-        if (value == null) return 0;
-        if (value instanceof Number) {
-            return ((Number) value).intValue();
-        }
-        try {
-            return Integer.parseInt(String.valueOf(value));
-        } catch (NumberFormatException e) {
-            log.warn("Could not parse int value for key {}: {}", key, value);
-            return 0;
-        }
+        if (value instanceof Number) return ((Number) value).intValue();
+        try { return Integer.parseInt(String.valueOf(value)); } catch (Exception e) { return 0; }
     }
 
     private double getDoubleValue(Map<String, Object> map, String key) {
         Object value = map.get(key);
-        if (value == null) return 0.0;
-        if (value instanceof Number) {
-            return ((Number) value).doubleValue();
-        }
-        try {
-            return Double.parseDouble(String.valueOf(value));
-        } catch (NumberFormatException e) {
-            log.warn("Could not parse double value for key {}: {}", key, value);
-            return 0.0;
-        }
-    }
-
-    private Order parseOrder(Map<String, Object> response) {
-        Order order = new Order();
-        order.setOrderId(UUID.randomUUID().toString());
-        order.setStatus("PLACED");
-        return order;
-    }
-
-    private List<Position> getMockPositions() {
-        List<Position> positions = new ArrayList<>();
-
-        Position pos1 = new Position();
-        pos1.setSymbol("RELIANCE");
-        pos1.setExchange("NSE");
-        pos1.setQuantity(10);
-        pos1.setAvgPrice(2450.50);
-        pos1.setLtp(2465.75);
-        pos1.setPnl(152.50);
-        pos1.setProductType("INTRADAY");
-        pos1.setPositionType("LONG");
-        positions.add(pos1);
-
-        Position pos2 = new Position();
-        pos2.setSymbol("TCS");
-        pos2.setExchange("NSE");
-        pos2.setQuantity(5);
-        pos2.setAvgPrice(3750.00);
-        pos2.setLtp(3745.25);
-        pos2.setPnl(-23.75);
-        pos2.setProductType("INTRADAY");
-        pos2.setPositionType("LONG");
-        positions.add(pos2);
-
-        return positions;
-    }
-
-    private Order getMockOrder(CreateOrderRequest request) {
-        Order order = new Order();
-        order.setOrderId("ORD" + System.currentTimeMillis());
-        order.setSymbol(request.getSymbol());
-        order.setExchange(request.getExchange());
-        order.setTransactionType(request.getTransactionType());
-        order.setQuantity(request.getQuantity());
-        order.setPrice(request.getPrice() != null ? request.getPrice() : 0.0);
-        order.setOrderType(request.getOrderType());
-        order.setProductType(request.getProductType());
-        order.setStatus("PLACED");
-        order.setTimestamp(LocalDateTime.now().toString());
-        return order;
+        if (value instanceof Number) return ((Number) value).doubleValue();
+        try { return Double.parseDouble(String.valueOf(value)); } catch (Exception e) { return 0.0; }
     }
 
     private static class RestTemplateErrorHandler implements ResponseErrorHandler {
-
         @Override
         public boolean hasError(ClientHttpResponse httpResponse) throws IOException {
             return (httpResponse.getStatusCode().is4xxClientError() ||
@@ -394,68 +303,7 @@ public class DhanService {
 
         @Override
         public void handleError(ClientHttpResponse httpResponse) throws IOException {
-            // Empty on purpose - allows HttpStatusCodeException to be thrown
-        }
-    }
-    public Order closePosition(ClosePositionRequest request) {
-        Optional<DhanAccount> account = getActiveAccount();
-        if (account.isEmpty()) {
-            throw new RuntimeException("No active Dhan account linked");
-        }
-
-        try {
-            // To close a position, place an opposite order
-            // If LONG position, place SELL order
-            // If SHORT position, place BUY order
-            String transactionType = "LONG".equals(request.getPositionType()) ? "SELL" : "BUY";
-
-            HttpHeaders headers = getDhanHeaders(account.get().getAccessToken());
-
-            String secId = request.getSecurityId();
-
-            Map<String, Object> orderData = new HashMap<>();
-            orderData.put("dhanClientId", account.get().getClientId());
-            orderData.put("transactionType", transactionType);
-            orderData.put("exchangeSegment", request.getExchange());
-            orderData.put("productType", request.getProductType());
-            orderData.put("orderType", "MARKET"); // Use MARKET order to close immediately
-            orderData.put("validity", "DAY");
-            orderData.put("quantity", request.getQuantity());
-            orderData.put("securityId", secId);
-            orderData.put("price", "0");
-            orderData.put("disclosedQuantity", "0");
-            orderData.put("triggerPrice", "0");
-            orderData.put("afterMarketOrder", false);
-
-            HttpEntity<Map<String, Object>> entity = new HttpEntity<>(orderData, headers);
-
-            String url = DHAN_BASE_URL + "/v2/orders";
-
-            log.info("Closing position - Symbol: {}, Type: {}, Qty: {}",
-                    request.getSymbol(), transactionType, request.getQuantity());
-
-            ResponseEntity<Map> response = restTemplate.exchange(
-                    url, HttpMethod.POST, entity, Map.class
-            );
-
-            log.info("Close position response: {}", response.getBody());
-
-            Order order = parseOrder(response.getBody());
-            order.setSymbol(request.getSymbol());
-            order.setTransactionType(transactionType);
-            order.setQuantity(request.getQuantity());
-
-            return order;
-
-        } catch (HttpStatusCodeException e) {
-            log.error("Dhan Close Position API returned status {}: {}",
-                    e.getStatusCode(),
-                    e.getResponseBodyAsString());
-            throw new RuntimeException("Failed to close position: " + e.getResponseBodyAsString());
-
-        } catch (Exception e) {
-            log.error("Error closing position on Dhan: {}", e.getMessage(), e);
-            throw new RuntimeException("Failed to close position: " + e.getMessage());
+            // Allow exception to propagate to be caught in try-catch blocks
         }
     }
 }

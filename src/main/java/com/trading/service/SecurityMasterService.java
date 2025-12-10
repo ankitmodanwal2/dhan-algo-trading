@@ -25,31 +25,30 @@ public class SecurityMasterService {
             log.info("Loading security master from Dhan...");
             URL url = new URL(SECURITY_MASTER_URL);
 
-            // Use OpenCSV for robust parsing
             try (CSVReader reader = new CSVReader(new InputStreamReader(url.openStream()))) {
                 String[] parts;
                 reader.readNext(); // Skip header row
 
                 while ((parts = reader.readNext()) != null) {
-                    // Dhan Compact CSV Format (approximate mapping):
-                    // 0: Exchange (SEM_EXM_EXCH_ID) e.g., "NSE"
-                    // 1: Segment (SEM_SEGMENT) e.g., "E"
-                    // 2: Security ID (SEM_SMST_SECURITY_ID) e.g., "1333"
-                    // 3: Instrument Type (SEM_GMT_INSTRUMENT_TYPE) e.g., "EQUITY"
-                    // 4: Instrument Name (SEM_INSTRUMENT_NAME) e.g., "HDFC Bank Ltd"
-                    // 5: Trading Symbol (SEM_TRADING_SYMBOL) e.g., "HDFCBANK"
+                    // Dhan Compact CSV Format:
+                    // 0: SEM_EXM_EXCH_ID (Exchange)
+                    // 1: SEM_SEGMENT (Segment)
+                    // 2: SEM_SMST_SECURITY_ID (Security ID)
+                    // 3: SEM_GMT_INSTRUMENT_TYPE (Instrument Type)
+                    // 4: SEM_INSTRUMENT_NAME (Name)
+                    // 5: SEM_TRADING_SYMBOL (Symbol)
+                    // 6: SEM_EXPIRY_DATE (Expiry)
+                    // 7: SEM_TICK_SIZE (Tick Size)
+                    // 8: SEM_LOT_UNITS (Lot Size)
 
                     if (parts.length >= 6) {
                         SecurityMaster security = new SecurityMaster();
-
-                        // Map parts[0] "NSE" to exchangeSegment so filter startsWith("NSE") works
-                        security.setExchangeSegment(parts[0].trim());
+                        security.setExchangeSegment(parts[0].trim()); // e.g., NSE
                         security.setSecurityId(parts[2].trim());
-                        security.setInstrumentType(parts[3].trim());
+                        security.setInstrumentType(parts[3].trim());  // e.g., EQUITY, OPTIDX
                         security.setName(parts[4].trim());
                         security.setTradingSymbol(parts[5].trim());
 
-                        // Parse optional numeric fields safely
                         if (parts.length > 7) {
                             try {
                                 security.setTickSize(Double.parseDouble(parts[7].trim()));
@@ -83,15 +82,37 @@ public class SecurityMasterService {
 
         return securityList.stream()
                 .filter(s -> {
-                    // Filter matches if Exchange (parts[0]) starts with "NSE" (derived from "NSE_EQ")
+                    // Filter by Exchange (e.g., NSE)
                     boolean matchesExchange = exchange == null ||
                             exchange.isEmpty() ||
                             (s.getExchangeSegment() != null && s.getExchangeSegment().startsWith(exchange));
 
+                    // Filter by Query in Symbol or Name
                     boolean matchesQuery = (s.getTradingSymbol() != null && s.getTradingSymbol().contains(searchQuery)) ||
                             (s.getName() != null && s.getName().toUpperCase().contains(searchQuery));
 
                     return matchesExchange && matchesQuery;
+                })
+                // 🌟 FIX: Sort to prioritize Equities and Exact Matches 🌟
+                .sorted((s1, s2) -> {
+                    // 1. Prioritize Exact Match
+                    boolean s1Exact = s1.getTradingSymbol().equals(searchQuery);
+                    boolean s2Exact = s2.getTradingSymbol().equals(searchQuery);
+                    if (s1Exact && !s2Exact) return -1;
+                    if (!s1Exact && s2Exact) return 1;
+
+                    // 2. Prioritize EQUITY Instrument Type
+                    boolean s1Equity = "EQUITY".equals(s1.getInstrumentType());
+                    boolean s2Equity = "EQUITY".equals(s2.getInstrumentType());
+                    if (s1Equity && !s2Equity) return -1;
+                    if (!s1Equity && s2Equity) return 1;
+
+                    // 3. Prioritize Shorter Symbols (likely underlying)
+                    int lenCompare = Integer.compare(s1.getTradingSymbol().length(), s2.getTradingSymbol().length());
+                    if (lenCompare != 0) return lenCompare;
+
+                    // 4. Alphabetical Order
+                    return s1.getTradingSymbol().compareTo(s2.getTradingSymbol());
                 })
                 .limit(limit)
                 .collect(Collectors.toList());
