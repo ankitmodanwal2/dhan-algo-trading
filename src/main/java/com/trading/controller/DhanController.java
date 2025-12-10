@@ -1,12 +1,12 @@
 package com.trading.controller;
 
-import com.trading.dto.ApiResponse;
-import com.trading.dto.CreateOrderRequest;
-import com.trading.dto.LinkAccountRequest;
+import com.trading.dto.*;
 import com.trading.model.DhanAccount;
 import com.trading.model.Order;
 import com.trading.model.Position;
+import com.trading.model.SecurityMaster;
 import com.trading.service.DhanService;
+import com.trading.service.SecurityMasterService;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.http.ResponseEntity;
@@ -21,6 +21,9 @@ public class DhanController {
 
     @Autowired
     private DhanService dhanService;
+
+    @Autowired
+    private SecurityMasterService securityMasterService;
 
     @PostMapping("/link-account")
     public ResponseEntity<ApiResponse<DhanAccount>> linkAccount(
@@ -99,6 +102,41 @@ public class DhanController {
         } catch (Exception e) {
             return ResponseEntity.badRequest().body(
                     ApiResponse.error(e.getMessage())
+            );
+        }
+    }
+    @PostMapping("/symbols/search")
+    public ResponseEntity<ApiResponse<List<SecurityMaster>>> searchSymbols(
+            @RequestBody SymbolSearchRequest request) {
+        try {
+            List<SecurityMaster> results = securityMasterService.searchSymbols(
+                    request.getQuery(),
+                    request.getExchange(),
+                    request.getLimit()
+            );
+            return ResponseEntity.ok(
+                    ApiResponse.success("Symbols found", results)
+            );
+        } catch (Exception e) {
+            log.error("Error searching symbols: {}", e.getMessage());
+            return ResponseEntity.badRequest().body(
+                    ApiResponse.error("Failed to search symbols: " + e.getMessage())
+            );
+        }
+    }
+
+    @PostMapping("/positions/close")
+    public ResponseEntity<ApiResponse<Order>> closePosition(
+            @RequestBody ClosePositionRequest request) {
+        try {
+            Order order = dhanService.closePosition(request);
+            return ResponseEntity.ok(
+                    ApiResponse.success("Position closed successfully", order)
+            );
+        } catch (Exception e) {
+            log.error("Error closing position: {}", e.getMessage());
+            return ResponseEntity.badRequest().body(
+                    ApiResponse.error("Failed to close position: " + e.getMessage())
             );
         }
     }

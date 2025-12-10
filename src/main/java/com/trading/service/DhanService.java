@@ -1,5 +1,6 @@
 package com.trading.service;
 
+import com.trading.dto.ClosePositionRequest;
 import com.trading.dto.CreateOrderRequest;
 import com.trading.model.DhanAccount;
 import com.trading.model.Order;
@@ -390,6 +391,65 @@ public class DhanService {
         @Override
         public void handleError(ClientHttpResponse httpResponse) throws IOException {
             // Empty on purpose - allows HttpStatusCodeException to be thrown
+        }
+    }
+    public Order closePosition(ClosePositionRequest request) {
+        Optional<DhanAccount> account = getActiveAccount();
+        if (account.isEmpty()) {
+            throw new RuntimeException("No active Dhan account linked");
+        }
+
+        try {
+            // To close a position, place an opposite order
+            // If LONG position, place SELL order
+            // If SHORT position, place BUY order
+            String transactionType = "LONG".equals(request.getPositionType()) ? "SELL" : "BUY";
+
+            HttpHeaders headers = getDhanHeaders(account.get().getAccessToken());
+
+            Map<String, Object> orderData = new HashMap<>();
+            orderData.put("dhanClientId", account.get().getClientId());
+            orderData.put("transactionType", transactionType);
+            orderData.put("exchangeSegment", request.getExchange());
+            orderData.put("productType", request.getProductType());
+            orderData.put("orderType", "MARKET"); // Use MARKET order to close immediately
+            orderData.put("validity", "DAY");
+            orderData.put("quantity", request.getQuantity());
+            orderData.put("securityId", request.getSecurityId());
+            orderData.put("price", "0");
+            orderData.put("disclosedQuantity", "0");
+            orderData.put("triggerPrice", "0");
+            orderData.put("afterMarketOrder", false);
+
+            HttpEntity<Map<String, Object>> entity = new HttpEntity<>(orderData, headers);
+
+            String url = DHAN_BASE_URL + "/v2/orders";
+
+            log.info("Closing position - Symbol: {}, Type: {}, Qty: {}",
+                    request.getSymbol(), transactionType, request.getQuantity());
+
+            ResponseEntity<Map> response = restTemplate.exchange(
+                    url, HttpMethod.POST, entity, Map.class
+            );
+
+            log.info("Close position response: {}", response.getBody());
+
+            Order order = parseOrder(response.getBody());
+            order.setSymbol(request.getSymbol());
+            order.setTransactionType(transactionType);
+            order.setQuantity(request.getQuantity());
+
+            return order;
+
+        } catch (HttpStatusCodeException e) {
+            log.error("Dhan Close Position API returned status {}: {}",
+                    e.getStatusCode(),
+                    e.getResponseBodyAsString());
+            throw new RuntimeException("Failed to close position: " + e.getResponseBodyAsString());
+
+        } catch (Exception e) {
+            log.error("Error closing position on Dhan: {}", e.getMessage(), e);
+            throw new RuntimeException("Failed to close position: " + e.getMessage());
         }
     }
 }
