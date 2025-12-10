@@ -201,16 +201,20 @@ public class DhanService {
 
                 Position pos = new Position();
 
-                // Get symbol - try multiple field names
+// Get symbol and securityId
                 String symbol = getStringValue(posMap, "tradingSymbol");
+                String securityId = getStringValue(posMap, "securityId");  // ADD THIS
+
                 if (symbol == null || symbol.isEmpty()) {
-                    symbol = getStringValue(posMap, "securityId");
+                    symbol = securityId;
                 }
                 if (symbol == null || symbol.isEmpty()) {
                     log.warn("Skipping position with no symbol: {}", posMap);
                     continue;
                 }
                 pos.setSymbol(symbol);
+                pos.setSecurityId(securityId);  // ADD THIS - Store the security ID
+
 
                 // Exchange and Product Type
                 pos.setExchange(getStringValue(posMap, "exchangeSegment"));
@@ -407,6 +411,8 @@ public class DhanService {
 
             HttpHeaders headers = getDhanHeaders(account.get().getAccessToken());
 
+            String secId = request.getSecurityId();
+
             Map<String, Object> orderData = new HashMap<>();
             orderData.put("dhanClientId", account.get().getClientId());
             orderData.put("transactionType", transactionType);
@@ -415,7 +421,7 @@ public class DhanService {
             orderData.put("orderType", "MARKET"); // Use MARKET order to close immediately
             orderData.put("validity", "DAY");
             orderData.put("quantity", request.getQuantity());
-            orderData.put("securityId", request.getSecurityId());
+            orderData.put("securityId", secId);
             orderData.put("price", "0");
             orderData.put("disclosedQuantity", "0");
             orderData.put("triggerPrice", "0");

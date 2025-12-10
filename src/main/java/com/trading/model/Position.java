@@ -5,6 +5,7 @@ import lombok.Data;
 @Data
 public class Position {
     private String symbol;
+    private String securityId;  // ADD THIS LINE
     private String exchange;
     private int quantity;
     private double avgPrice;
