@@ -396,7 +396,7 @@ function App() {
                             )}
 
                             <button
-                                disabled={loading || !order.securityId}
+                                disabled={loading}
                                 className={order.transactionType === 'BUY' ? "btn btn-buy" : "btn btn-sell"}
                             >
                                 {loading ? 'Processing...' : `${order.transactionType} ${order.symbol || 'Select Symbol'}`}
